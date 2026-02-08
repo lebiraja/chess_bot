@@ -75,6 +75,7 @@ class ChessBot:
         self.player_color: bool = chess.WHITE
         self.internal_board: chess.Board = chess.Board()
         self.move_count = 0
+        self.last_board_fen: str = ""
 
     async def initialize(self):
         """Initialize the browser and connect to chess.com."""
@@ -128,6 +129,7 @@ class ChessBot:
                 # Reset for new game
                 self.internal_board = chess.Board()
                 self.move_count = 0
+                self.last_board_fen = ""
                 self.engine.reset()
 
                 # Play the game
@@ -155,40 +157,71 @@ class ChessBot:
         Returns:
             Game result string
         """
+        consecutive_same_board = 0
+
         while True:
             # Check if game is over
             is_over, result = await self.game_detector.is_game_over()
             if is_over:
                 return self._format_result(result)
 
-            # Read current board state
+            # Read current board state from chess.com
             try:
                 current_board = await self.board_reader.read_board()
+                current_fen = current_board.fen().split()[0]  # Just piece positions
             except Exception as e:
                 print(f"Error reading board: {e}")
                 await asyncio.sleep(0.5)
                 continue
 
-            # Sync internal board with actual board
+            # Check if board has changed since last check
+            if current_fen == self.last_board_fen:
+                consecutive_same_board += 1
+                if consecutive_same_board > 20:  # ~10 seconds of no change
+                    print("Board unchanged for too long, checking game state...")
+                    state = await self.game_detector.get_game_state()
+                    if state == GameState.GAME_OVER:
+                        return "Game ended"
+                    consecutive_same_board = 0
+                await asyncio.sleep(0.5)
+                continue
+
+            # Board changed!
+            consecutive_same_board = 0
+            self.last_board_fen = current_fen
+
+            # Sync our internal board with what we see on screen
             self._sync_board(current_board)
 
-            # Check if it's our turn
-            is_our_turn = await self.game_detector.is_our_turn(self.player_color)
+            # Determine whose turn it is based on piece count and position
+            # The board we read doesn't have turn info, so we infer it
+            is_our_turn = self._is_our_turn(current_board)
 
             if not is_our_turn:
-                # Wait for opponent's move
+                # Not our turn, wait for opponent
                 await asyncio.sleep(0.3)
                 continue
 
-            # Calculate and make our move
+            # It's our turn! Calculate and make a move
             best_move = await self.calculate_best_move()
 
             if best_move is None:
                 print("No legal moves available!")
-                break
+                await asyncio.sleep(1)
+                continue
+
+            # Validate move is legal
+            if best_move not in self.internal_board.legal_moves:
+                print(f"Move {best_move} not legal, recalculating...")
+                # Re-sync and recalculate
+                self.internal_board = current_board.copy()
+                self.internal_board.turn = self.player_color
+                continue
 
             # Execute the move
-            print(f"Playing: {self.internal_board.san(best_move)}")
+            move_san = self.internal_board.san(best_move)
+            print(f"Playing: {move_san}")
+
             success = await self.move_executor.make_move(
                 best_move,
                 is_flipped=(self.player_color == chess.BLACK),
@@ -202,10 +235,41 @@ class ChessBot:
                 if self.settings.log_moves:
                     print(f"Move {self.move_count}: {best_move.uci()}")
 
-            # Wait a bit before checking again
+                # IMPORTANT: Wait for the move to register and opponent to potentially move
+                await asyncio.sleep(1.0)
+
+                # Update last_board_fen to prevent re-triggering
+                try:
+                    new_board = await self.board_reader.read_board()
+                    self.last_board_fen = new_board.fen().split()[0]
+                except Exception:
+                    pass
+
             await asyncio.sleep(0.5)
 
         return "Game ended"
+
+    def _is_our_turn(self, current_board: chess.Board) -> bool:
+        """
+        Determine if it's our turn based on piece positions.
+
+        We compare the current board to our internal board to see
+        if the opponent has moved.
+        """
+        current_pieces = current_board.fen().split()[0]
+        internal_pieces = self.internal_board.fen().split()[0]
+
+        # If boards match and it was previously our turn after we moved,
+        # then it's opponent's turn now
+        if current_pieces == internal_pieces:
+            # Board hasn't changed - check if we just moved
+            # If internal_board.turn != our color, we already moved
+            return self.internal_board.turn == self.player_color
+
+        # Board is different from what we expect
+        # This means opponent moved or we need to resync
+        # Set turn to our color since we need to respond
+        return True
 
     async def calculate_best_move(self) -> chess.Move:
         """
@@ -216,10 +280,13 @@ class ChessBot:
         Returns:
             The best move found
         """
+        # Make sure internal board has correct turn
+        self.internal_board.turn = self.player_color
+
         # 1. Try opening book (first ~10 moves)
         if (
             self.settings.use_opening_book
-            and self.move_count < self.settings.opening_book_depth * 2  # fullmove vs halfmove
+            and self.internal_board.fullmove_number <= self.settings.opening_book_depth
         ):
             book_move = self.opening_book.get_move(self.internal_board)
             if book_move:
@@ -253,13 +320,10 @@ class ChessBot:
         actual_pieces = actual_board.fen().split()[0]
 
         if internal_pieces != actual_pieces:
-            # Board has changed - try to find the move that was made
-            # For now, just copy the board state
-            # TODO: Track actual moves for better accuracy
+            # Board has changed - copy the new state
             self.internal_board = actual_board.copy()
-
-            # Set turn based on player color and whether we think it's our turn
-            # (the actual_board may not have accurate turn info)
+            # Set turn to our color (we'll verify this separately)
+            self.internal_board.turn = self.player_color
 
     def _format_result(self, result: GameResult) -> str:
         """Format game result as string."""

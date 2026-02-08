@@ -51,6 +51,35 @@ class GameDetector:
         self._player_color: Optional[bool] = None
         self._game_state = GameState.NO_GAME
 
+    async def _safe_query_selector(self, selector: str):
+        """Safely query selector, handling navigation errors."""
+        try:
+            return await self.page.query_selector(selector)
+        except Exception:
+            await asyncio.sleep(0.3)
+            try:
+                return await self.page.query_selector(selector)
+            except Exception:
+                return None
+
+    async def _safe_query_selector_all(self, selector: str):
+        """Safely query all selectors, handling navigation errors."""
+        try:
+            return await self.page.query_selector_all(selector)
+        except Exception:
+            await asyncio.sleep(0.3)
+            try:
+                return await self.page.query_selector_all(selector)
+            except Exception:
+                return []
+
+    async def _safe_evaluate(self, expression: str, default=None):
+        """Safely evaluate JS, handling navigation errors."""
+        try:
+            return await self.page.evaluate(expression)
+        except Exception:
+            return default
+
     async def detect_player_color(self) -> bool:
         """
         Detect which color the player is.
@@ -59,19 +88,22 @@ class GameDetector:
             chess.WHITE or chess.BLACK
         """
         # Check if board is flipped
-        board_elem = await self.page.query_selector(
+        board_elem = await self._safe_query_selector(
             "chess-board, wc-chess-board, .board"
         )
 
         if board_elem:
-            classes = await board_elem.get_attribute("class")
-            if classes and "flipped" in classes:
-                self._player_color = chess.BLACK
-                return chess.BLACK
+            try:
+                classes = await board_elem.get_attribute("class")
+                if classes and "flipped" in classes:
+                    self._player_color = chess.BLACK
+                    return chess.BLACK
+            except Exception:
+                pass
 
         # Alternative: check player name positions
         # On chess.com, your username appears at the bottom
-        bottom_player = await self.page.query_selector(
+        bottom_player = await self._safe_query_selector(
             ".player-component.player-bottom .user-username-component"
         )
 
@@ -95,46 +127,50 @@ class GameDetector:
         """
         # Method 1: Check for clock highlighting
         clock_selector = ".clock-bottom.clock-player-turn, .clock-component.clock-bottom.clock-running"
-        our_clock = await self.page.query_selector(clock_selector)
+        our_clock = await self._safe_query_selector(clock_selector)
 
         if our_clock:
             return True
 
         # Method 2: Check if board is interactive
         # When it's not our turn, pieces may not be draggable
-        try:
-            is_interactive = await self.page.evaluate("""
-                () => {
-                    const board = document.querySelector('chess-board, wc-chess-board');
-                    if (!board) return false;
+        is_interactive = await self._safe_evaluate(
+            """
+            () => {
+                const board = document.querySelector('chess-board, wc-chess-board');
+                if (!board) return false;
 
-                    // Check if we can interact with pieces
-                    const pieces = board.querySelectorAll('.piece');
-                    for (const piece of pieces) {
-                        const style = window.getComputedStyle(piece);
-                        if (style.cursor === 'grab' || style.cursor === 'pointer') {
-                            return true;
-                        }
+                // Check if we can interact with pieces
+                const pieces = board.querySelectorAll('.piece');
+                for (const piece of pieces) {
+                    const style = window.getComputedStyle(piece);
+                    if (style.cursor === 'grab' || style.cursor === 'pointer') {
+                        return true;
                     }
-                    return false;
                 }
-            """)
-            return is_interactive
-        except Exception:
-            pass
+                return false;
+            }
+        """,
+            default=False,
+        )
+        if is_interactive:
+            return True
 
         # Method 3: Check move indicator
-        move_indicator = await self.page.query_selector(".move-indicator")
+        move_indicator = await self._safe_query_selector(".move-indicator")
         if move_indicator:
-            classes = await move_indicator.get_attribute("class")
-            if classes:
-                # The move indicator shows whose turn it is
-                if "white" in classes.lower():
-                    return player_color == chess.WHITE
-                elif "black" in classes.lower():
-                    return player_color == chess.BLACK
+            try:
+                classes = await move_indicator.get_attribute("class")
+                if classes:
+                    # The move indicator shows whose turn it is
+                    if "white" in classes.lower():
+                        return player_color == chess.WHITE
+                    elif "black" in classes.lower():
+                        return player_color == chess.BLACK
+            except Exception:
+                pass
 
-        # Default: assume it might be our turn
+        # Default: assume it might not be our turn
         return False
 
     async def wait_for_game_start(self, timeout: float = 120.0) -> bool:
@@ -148,16 +184,21 @@ class GameDetector:
             True if game started, False if timeout
         """
         print("Waiting for game to start...")
+        print("(Navigate to a game on chess.com or start a new game)")
 
         start_time = asyncio.get_event_loop().time()
 
         while asyncio.get_event_loop().time() - start_time < timeout:
-            state = await self.get_game_state()
+            try:
+                state = await self.get_game_state()
 
-            if state == GameState.IN_PROGRESS:
-                print("Game started!")
-                self._game_state = GameState.IN_PROGRESS
-                return True
+                if state == GameState.IN_PROGRESS:
+                    print("Game started!")
+                    self._game_state = GameState.IN_PROGRESS
+                    return True
+            except Exception as e:
+                # Handle navigation/context errors gracefully
+                pass
 
             await asyncio.sleep(0.5)
 
@@ -171,23 +212,23 @@ class GameDetector:
             GameState enum value
         """
         # Check for game over modal
-        game_over = await self.page.query_selector(
+        game_over = await self._safe_query_selector(
             ".game-over-modal, .game-review-modal, [class*='game-over']"
         )
         if game_over:
             return GameState.GAME_OVER
 
         # Check for active game
-        board = await self.page.query_selector(
+        board = await self._safe_query_selector(
             "chess-board, wc-chess-board, .board"
         )
 
         if board:
             # Check if there are pieces on the board
-            pieces = await self.page.query_selector_all(".piece")
+            pieces = await self._safe_query_selector_all(".piece")
             if len(pieces) > 0:
                 # Check for waiting state (seeking game)
-                seeking = await self.page.query_selector(
+                seeking = await self._safe_query_selector(
                     ".seeking-component, .challenge-component, [class*='seeking']"
                 )
                 if seeking:
@@ -213,21 +254,24 @@ class GameDetector:
         ]
 
         for selector in game_over_selectors:
-            modal = await self.page.query_selector(selector)
+            modal = await self._safe_query_selector(selector)
             if modal:
                 result = await self._parse_game_result(modal)
                 return True, result
 
         # Check for game end in move list
-        result_elem = await self.page.query_selector(
+        result_elem = await self._safe_query_selector(
             ".result, .game-result, [class*='result']"
         )
         if result_elem:
-            text = await result_elem.inner_text()
-            if text:
-                result = self._parse_result_text(text)
-                if result != GameResult.ONGOING:
-                    return True, result
+            try:
+                text = await result_elem.inner_text()
+                if text:
+                    result = self._parse_result_text(text)
+                    if result != GameResult.ONGOING:
+                        return True, result
+            except Exception:
+                pass
 
         return False, None
 
@@ -260,9 +304,7 @@ class GameDetector:
         return GameResult.ONGOING
 
     async def wait_for_opponent_move(
-        self,
-        current_fen: str,
-        timeout: float = 300.0
+        self, current_fen: str, timeout: float = 300.0
     ) -> bool:
         """
         Wait for the opponent to make a move.
@@ -309,13 +351,13 @@ class GameDetector:
 
         try:
             # Get bottom clock (our clock)
-            bottom_clock = await self.page.query_selector(".clock-bottom .clock-time")
+            bottom_clock = await self._safe_query_selector(".clock-bottom .clock-time")
             if bottom_clock:
                 time_text = await bottom_clock.inner_text()
                 our_time = self._parse_time(time_text)
 
             # Get top clock (opponent's clock)
-            top_clock = await self.page.query_selector(".clock-top .clock-time")
+            top_clock = await self._safe_query_selector(".clock-top .clock-time")
             if top_clock:
                 time_text = await top_clock.inner_text()
                 opp_time = self._parse_time(time_text)

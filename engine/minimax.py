@@ -105,7 +105,7 @@ class ChessEngine:
                 pv_str = " ".join(m.uci() for m in pv)
 
                 print(
-                    f"depth {depth:2d}  score {score:+6d}  "
+                    f"depth {depth:2d}  score {int(score):+6d}  "
                     f"nodes {self.nodes_searched:8d}  "
                     f"nps {nps:8.0f}  "
                     f"pv {pv_str}"
