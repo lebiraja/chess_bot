@@ -13,6 +13,7 @@ from pathlib import Path
 import chess
 
 from config.settings import Settings
+from config.game_modes import get_game_mode, GAME_MODES
 from database.endgame_tablebase import EndgameTablebase
 from database.opening_book import OpeningBook
 from engine.minimax import ChessEngine
@@ -20,6 +21,7 @@ from automation.board_reader import BoardReader
 from automation.browser import BrowserController
 from automation.game_detector import GameDetector, GameResult, GameState
 from automation.move_executor import MoveExecutor
+from tui import select_game_mode
 
 
 class ChessBot:
@@ -354,29 +356,34 @@ async def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    # Game mode selection
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=list(GAME_MODES.keys()),
+        help="Game mode preset (skip TUI if specified)",
+    )
+
+    # Override individual settings
     parser.add_argument(
         "--depth",
         type=int,
-        default=5,
-        help="Search depth (ply)",
+        help="Search depth (ply) - overrides mode setting",
     )
     parser.add_argument(
         "--time-limit",
         type=float,
-        default=10.0,
-        help="Maximum time per move (seconds)",
+        help="Maximum time per move (seconds) - overrides mode setting",
     )
     parser.add_argument(
         "--min-delay",
         type=float,
-        default=1.0,
-        help="Minimum delay before moving (seconds)",
+        help="Minimum delay before moving (seconds) - overrides mode setting",
     )
     parser.add_argument(
         "--max-delay",
         type=float,
-        default=3.0,
-        help="Maximum delay before moving (seconds)",
+        help="Maximum delay before moving (seconds) - overrides mode setting",
     )
     parser.add_argument(
         "--headless",
@@ -397,12 +404,29 @@ async def main():
 
     args = parser.parse_args()
 
-    # Create settings
+    # Determine game mode
+    mode_id = args.mode
+    if not mode_id:
+        # Show TUI for selection
+        mode_id = select_game_mode()
+        if not mode_id:
+            print("No game mode selected. Exiting.")
+            sys.exit(0)
+
+    game_mode = get_game_mode(mode_id)
+    print(f"\nSelected: {game_mode.display_name}")
+    print(f"  Time: {game_mode.time_seconds}s + {game_mode.increment}s")
+    print(f"  Depth: {game_mode.search_depth} ply")
+    print(f"  Time limit: {game_mode.time_limit}s/move")
+    print()
+
+    # Create settings from game mode
     settings = Settings(
-        search_depth=args.depth,
-        time_limit=args.time_limit,
-        min_move_delay=args.min_delay,
-        max_move_delay=args.max_delay,
+        game_mode=mode_id,
+        search_depth=args.depth or game_mode.search_depth,
+        time_limit=args.time_limit or game_mode.time_limit,
+        min_move_delay=args.min_delay or game_mode.min_delay,
+        max_move_delay=args.max_delay or game_mode.max_delay,
         headless=args.headless,
         use_opening_book=not args.no_book,
         chess_com_url=args.url,

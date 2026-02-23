@@ -9,6 +9,9 @@ from pathlib import Path
 class Settings:
     """Configuration settings for the chess bot."""
 
+    # Game mode
+    game_mode: str = "blitz_5"  # Selected game mode ID
+
     # Engine settings
     search_depth: int = 5  # Ply (half-moves) to search
     time_limit: float = 10.0  # Max seconds per move

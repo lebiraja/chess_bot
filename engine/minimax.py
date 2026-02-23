@@ -94,7 +94,8 @@ class ChessEngine:
 
             score, move = self._search_root(board, depth)
 
-            if move is not None and not self._time_up():
+            # Always save a completed depth result
+            if move is not None:
                 best_move = move
                 best_score = score
 
@@ -159,7 +160,7 @@ class ChessEngine:
         self, board: chess.Board, depth: int, alpha: int, beta: int
     ) -> int:
         """
-        Alpha-beta search with transposition table.
+        Alpha-beta search with transposition table, null move pruning, and LMR.
 
         Args:
             board: The current board position
@@ -203,6 +204,14 @@ class ChessEngine:
                 return self._quiescence(board, alpha, beta, self.quiescence_depth)
             return self.evaluator.evaluate(board)
 
+        # Null move pruning (skip if in check, endgame, or shallow depth)
+        if depth >= 3 and not board.is_check() and not self._is_endgame(board):
+            board.push(chess.Move.null())
+            null_score = -self._alpha_beta(board, depth - 3, -beta, -beta + 1)
+            board.pop()
+            if null_score >= beta:
+                return beta
+
         # Search all moves
         best_score = -MATE_SCORE
         best_move = None
@@ -210,9 +219,19 @@ class ChessEngine:
 
         moves = self._order_moves(board, depth, tt_entry.best_move if tt_entry else None)
 
-        for move in moves:
+        for i, move in enumerate(moves):
+            is_capture = board.is_capture(move)
             board.push(move)
-            score = -self._alpha_beta(board, depth - 1, -beta, -alpha)
+
+            # Late move reductions - reduce depth for quiet moves after the first few
+            if i >= 4 and depth >= 3 and not is_capture and not move.promotion:
+                score = -self._alpha_beta(board, depth - 2, -alpha - 1, -alpha)
+                # If promising, re-search at full depth
+                if score > alpha:
+                    score = -self._alpha_beta(board, depth - 1, -beta, -alpha)
+            else:
+                score = -self._alpha_beta(board, depth - 1, -beta, -alpha)
+
             board.pop()
 
             if score > best_score:
@@ -223,13 +242,13 @@ class ChessEngine:
                 alpha = score
 
                 # Update history heuristic for quiet moves
-                if not board.is_capture(move):
+                if not is_capture:
                     key = (move.from_square, move.to_square)
                     self.history[key] = self.history.get(key, 0) + depth * depth
 
             if alpha >= beta:
                 # Beta cutoff - store killer move
-                if not board.is_capture(move):
+                if not is_capture:
                     self._store_killer(move, depth)
                 break
 
@@ -280,13 +299,7 @@ class ChessEngine:
         # Only search captures (and checks at depth > 0)
         for move in self._get_captures(board):
             board.push(move)
-
-            # Skip if puts us in check (illegal after opponent move)
-            if board.is_check():
-                score = -self._quiescence(board, -beta, -alpha, depth - 1)
-            else:
-                score = -self._quiescence(board, -beta, -alpha, depth - 1)
-
+            score = -self._quiescence(board, -beta, -alpha, depth - 1)
             board.pop()
 
             if score >= beta:
@@ -388,6 +401,24 @@ class ChessEngine:
     def _time_up(self) -> bool:
         """Check if time limit has been exceeded."""
         return time.time() - self.start_time >= self.time_limit
+
+    def _is_endgame(self, board: chess.Board) -> bool:
+        """
+        Check if position is in the endgame.
+
+        Heuristic: endgame if total material (excluding pawns) < 15 points
+        (roughly: both sides have only rooks, bishops, knights, and pawns)
+        """
+        material = 0
+        for piece in board.piece_map().values():
+            # Queen=9, Rook=5, Bishop=3, Knight=3
+            if piece.piece_type == chess.QUEEN:
+                material += 9
+            elif piece.piece_type == chess.ROOK:
+                material += 5
+            elif piece.piece_type in (chess.BISHOP, chess.KNIGHT):
+                material += 3
+        return material < 15
 
     def reset(self):
         """Reset engine state for a new game."""
